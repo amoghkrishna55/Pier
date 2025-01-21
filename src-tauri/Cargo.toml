@@ -24,6 +24,7 @@ axum = "0.6"
 dotenv = "0.15.0"
 headers = "0.4.0"
 webbrowser = "0.8.13"
+sysinfo = "0.26.3"
 
 [features]
 # by default Tauri runs in production mode

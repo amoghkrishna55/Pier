@@ -3,28 +3,43 @@
     windows_subsystem = "windows"
 )]
 
-use axum::{
-    extract::ConnectInfo,
-    http::{StatusCode, Uri},
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
 use dotenv::dotenv;
-use ngrok::prelude::*;
-use std::env;
-use std::net::SocketAddr;
+use sysinfo;
 use tauri::{CustomMenuItem, Manager, SystemTray, SystemTrayEvent, SystemTrayMenu};
 use tauri_plugin_positioner::{Position, WindowExt};
 use tokio::runtime::Runtime;
-use webbrowser;
+use tokio::time::{sleep, Duration};
 
-async fn open_youtube() -> impl IntoResponse {
-    if webbrowser::open("https://www.youtube.com").is_ok() {
-        (StatusCode::OK, "Opened YouTube in the default browser")
-    } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open YouTube")
+mod ngrok;
+mod warp;
+
+async fn handle_ngrok_and_warp() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Err(e) = ngrok::invoke_ngrok().await {
+        eprintln!("Failed to invoke ngrok: {}", e);
+        let invoke = warp::connect_to_warp();
+
+        if invoke {
+            loop {
+                let status = warp::get_warp_status();
+
+                if status.contains("Status update: Connected") {
+                    ngrok::invoke_ngrok().await.unwrap();
+                    break;
+                } else if status.contains("Reason: No Network") {
+                    println!("nO netwrok");
+                    break;
+                }
+                println!("Waiting for WARP to connect...");
+                sleep(Duration::from_secs(3)).await;
+            }
+        }
     }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_address() -> String {
+    "http://localhost:3000".to_string() // Replace with your actual address logic
 }
 
 fn main() {
@@ -35,45 +50,19 @@ fn main() {
     // Create a new Tokio runtime
     let rt = Runtime::new().unwrap();
 
-    // Start the ngrok server in the background
-    rt.spawn(async {
-        // build our application with a single route
-        let app = Router::new()
-            .route(
-                "/",
-                get(
-                    |ConnectInfo(remote_addr): ConnectInfo<SocketAddr>| async move {
-                        format!("Hello, {remote_addr:?}!\r\n")
-                    },
-                ),
-            )
-            .route("/youtube", get(open_youtube));
-
-        let tun = ngrok::Session::builder()
-            // Read the token from the NGROK_AUTHTOKEN environment variable
-            .authtoken_from_env()
-            // Connect the ngrok session
-            .connect()
-            .await
-            .unwrap()
-            // Start a tunnel with an HTTP edge
-            .http_endpoint()
-            .domain(env::var("NGROK_DOMAIN").unwrap())
-            .listen()
-            .await
-            .unwrap();
-
-        println!("Tunnel started on URL: {:?}", tun.url());
-
-        // Run it with an ngrok tunnel instead!
-        axum::Server::builder(tun)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .unwrap();
+    rt.spawn(async move {
+        if let Err(e) = handle_ngrok_and_warp().await {
+            eprintln!("Error in handle_ngrok_and_warp: {}", e);
+        }
     });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
+        .invoke_handler(tauri::generate_handler![
+            get_address,
+            warp::get_warp_status,
+            warp::disconnect_from_warp
+        ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -89,6 +78,12 @@ fn main() {
                     ..
                 } => {
                     let window = app.get_window("main").unwrap();
+                    // window
+                    //     .set_size(tauri::Size::Logical(tauri::LogicalSize {
+                    //         width: 300.0,
+                    //         height: 1000.0,
+                    //     }))
+                    //     .unwrap();
                     let _ = window.move_window(Position::TrayCenter);
 
                     if window.is_visible().unwrap() {
@@ -136,4 +131,9 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    // Keep the runtime alive until the application exits
+    rt.block_on(async {
+        // Your async code here if needed
+    });
 }
